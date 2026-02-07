@@ -2,7 +2,7 @@
 
 本指南详细介绍 Mermaid 支持的所有图表类型，包括语法、使用场景和完整示例。
 
-## 目录
+## 0. 目录
 
 1. [Flowchart - 流程图](#1-flowchart---流程图)
 2. [Sequence Diagram - 时序图](#2-sequence-diagram---时序图)
