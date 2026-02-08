@@ -5,11 +5,12 @@
 ## 目录
 
 1. [主题选择](#主题选择)
-2. [配色方案](#配色方案)
-3. [节点形状语义](#节点形状语义)
-4. [布局方向选择](#布局方向选择)
-5. [视觉优化技巧](#视觉优化技巧)
-6. [优化案例分析](#优化案例分析)
+2. [环境适配](#环境适配)
+3. [配色方案](#配色方案)
+4. [节点形状语义](#节点形状语义)
+5. [布局方向选择](#布局方向选择)
+6. [视觉优化技巧](#视觉优化技巧)
+7. [优化案例分析](#优化案例分析)
 
 ---
 
@@ -27,24 +28,209 @@
 ### 主题选择决策树
 
 ```
-使用场景？
-├─ 技术文档/博客 → default（通用、专业）
-├─ 演示文稿/暗色背景 → dark（对比强、酷炫）
-├─ 自然/环保主题 → forest（绿色系、清新）
-└─ 正式报告/极简 → neutral（灰色系、简洁）
+
+---
+
+## 2. 环境适配
+
+### 渲染环境的影响
+
+不同的渲染环境（浅色/深色背景）对图表的可读性有重大影响。
+
+**常见问题**：
+- `default` 主题在 dark 编辑器中连接线对比度低，看不清
+- 自定义样式在深色背景下文字不可读
+- 浅色图表在深色背景上突兀，视觉不协调
+
+---
+
+### 环境适配决策树
+
+**策略1：已知环境（主Agent统一收集）**
+
+```python
+# 主Agent询问用户一次
+editor_mode = ask_user("在什么环境下查看图表？(dark/light/默认)")
+
+# 并行委托时传递环境信息
+delegate_task(
+    prompt=f"创建架构图，环境：{editor_mode}（根据此选择主题）"
+)
 ```
 
-### 主题配置语法
+**决策逻辑**：
+```
+用户明确告知环境？
+├─ Light 模式
+│   ├─ 推荐主题：default / forest / neutral
+│   └─ 使用：flowchart-templates.md
+└─ Dark 模式
+    ├─ 推荐主题：dark（首选）/ forest（备选）
+    └─ 使用：flowchart-templates-dark.md
+```
 
-**方式1：init 指令**
+---
+
+**策略2：未知环境（默认策略，不询问）**
+
+**不询问用户，使用智能默认值**：
+
+```python
+# 子Agent根据文档类型选择默认主题
+文档类型？
+├─ 技术文档/博客 → default
+├─ 演示文稿 → dark
+└─ 不确定 → default
+```
+
+**在返回结果中提供切换指南**：
+```markdown
+✅ 图表已创建
+- 主题：default（适用于浅色背景）
+
+🎨 主题切换指南：
+- 如果在dark模式编辑器中查看，建议将主题改为 `dark`
+- 修改方式：将首行改为 `%%{init: {'theme':'dark'}}%%`
+```
+
+---
+
+### Dark 模式适配指南
+
+#### 1. 主题选择
+
+**推荐主题（按优先级）**：
+
+| 主题 | 适配性 | 优点 | 缺点 |
+|------|--------|------|------|
+| **dark** | ⭐⭐⭐⭐⭐ | 专为深色设计，高对比度 | 颜色较单一 |
+| **forest** | ⭐⭐⭐⭐ | 绿色系，清新自然 | 部分节点对比度不足 |
+| neutral | ⭐⭐⭐ | 灰色系，简洁 | 对比度一般 |
+
+**不推荐**：
+- ❌ `default` - 连接线对比度低，看不清
+
+#### 2. 自定义样式适配
+
+**浅色背景的样式 → 深色背景适配**：
+
+| 元素 | 浅色背景 | 深色背景 |
+|------|----------|----------|
+| 浅色填充 | `#e3f2fd` | `#4dabf7` |
+| 中性填充 | `#f1f8e9` | `#69db7c` |
+| 深色文字 | `#333` | `#f8f9fa` |
+| 浅色文字 | `#fff` | `#fff` |
+| 边框 | `#1565c0` | `#1864ab` |
+
+**示例**：
+
 ```mermaid
+%% 浅色背景样式
+style A fill:#e3f2fd,stroke:#1565c0,color:#333
+```
+
+```mermaid
+%% 深色背景样式（适配后）
+style A fill:#4dabf7,stroke:#1864ab,color:#fff
+```
+
+#### 3. Dark 主题配色建议
+
+**高对比度配色方案**：
+
+| 用途 | 推荐颜色 | 文字颜色 | 对比度 |
+|------|----------|----------|--------|
+| 蓝色系 | `#4dabf7` | `#fff` | ⭐⭐⭐⭐⭐ |
+| 绿色系 | `#69db7c` | `#212529` | ⭐⭐⭐⭐⭐ |
+| 黄色系 | `#ffd43b` | `#212529` | ⭐⭐⭐⭐ |
+| 红色系 | `#ff8787` | `#fff` | ⭐⭐⭐⭐⭐ |
+| 紫色系 | `#da77f2` | `#fff` | ⭐⭐⭐⭐⭐ |
+| 橙色系 | `#ffa94d` | `#212529` | ⭐⭐⭐⭐ |
+
+**配色原则**：
+- 浅色背景节点（蓝、红、紫）→ 使用白色文字 `color:#fff`
+- 中性/深色背景节点（绿、黄、橙）→ 使用深色文字 `color:#212529`
+- 确保对比度至少 4.5:1（WCAG AA 标准）
+
+#### 4. Dark 模板快速使用
+
+**方法1：使用预置模板**
+```bash
+# 浅色背景
+cat assets/templates/flowchart-templates.md
+
+# 深色背景
+cat assets/templates/flowchart-templates-dark.md
+```
+
+**方法2：修改主题配置**
+```mermaid
+%% 浅色主题
+%%{init: {'theme':'default'}}%%
+
+%% 深色主题
 %%{init: {'theme':'dark'}}%%
-flowchart LR
-    A --> B
 ```
 
-**方式2：Frontmatter（v11+）**
+**方法3：自定义变量**
 ```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#1e1e1e',
+    'primaryColor': '#4dabf7',
+    'primaryTextColor': '#fff',
+    'primaryBorderColor': '#1864ab',
+    'lineColor': '#e9ecef',
+    'textColor': '#f8f9fa'
+  }
+}}%%
+```
+
+---
+
+### 并行委托环境信息传递
+
+**主Agent统一收集（推荐）**：
+
+```python
+# Step 1: 询问用户一次（如果需要）
+editor_mode = ask_user_once("在什么环境下查看图表？(dark/light/默认)")
+
+# Step 2: 并行委托时传递环境信息
+timestamp = $(date +%Y%m%d-%H%M%S)
+
+delegate_task(
+    category="quick",
+    load_skills=["mermaid"],
+    prompt=f"""
+    创建系统架构Flowchart：
+    - 编辑器环境：{editor_mode}
+    - dark模式使用dark主题，light模式使用default主题
+    - 使用 --move-to 参数
+    """,
+    run_in_background=True
+)
+
+delegate_task(
+    category="quick",
+    load_skills=["mermaid"],
+    prompt=f"""
+    创建用户登录Sequence Diagram：
+    - 编辑器环境：{editor_mode}
+    - 使用 --move-to 参数
+    """,
+    run_in_background=True
+)
+```
+
+**注意事项**：
+- ✅ 主Agent统一收集环境信息，只询问一次
+- ✅ 通过 prompt 参数传递给子Agent
+- ❌ 避免让每个子Agent都询问用户（会造成重复询问）
+
+---
+
 ---
 config:
   theme: forest
@@ -512,6 +698,22 @@ flowchart LR
 | 完成必须项 + 1-2个加分项 | 80-85分 |
 | 完成必须项 + 3个以上加分项 | 85-95分 |
 | 全部完成 + 精细调整 | 95-100分 |
+
+### 分级标准
+
+| 级别 | 节点数 | 标签长度 | 层次深度 |
+|------|--------|----------|----------|
+| **推荐标准** | <20 | <10字 | <5层 |
+| **最小要求** | <50 | <25字 | <6层 |
+
+**使用验证脚本检查**：
+```bash
+# 默认模式（最小要求）
+python3 scripts/validate_mermaid.py diagram.md
+
+# 严格模式（推荐标准）
+python3 scripts/validate_mermaid.py diagram.md --strict
+```
 
 ---
 

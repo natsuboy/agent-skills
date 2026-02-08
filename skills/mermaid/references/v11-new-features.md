@@ -419,10 +419,10 @@ config:
 npm install -g @mermaid-js/mermaid-cli
 
 # 使用 v11 特性
-mmdc -i input.mmd -o output.svg
+mmdc -i input.mm -o output.svg
 
 # 指定配置
-mmdc -i input.mmd -o output.svg -c config.json
+mmdc -i input.md -o output.svg -c config.json
 ```
 
 ---

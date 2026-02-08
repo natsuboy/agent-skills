@@ -17,42 +17,10 @@
 ##############################################################################
 
 set -e
+set -u
 
-# 颜色定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-# 工具函数
-log_step() {
-  echo -e "${CYAN}[$1]${NC} $2"
-}
-
-log_success() {
-  echo -e "${GREEN}✅${NC} $1"
-}
-
-log_error() {
-  echo -e "${RED}❌${NC} $1"
-  exit 1
-}
-
-log_warning() {
-  echo -e "${YELLOW}⚠️${NC} $1"
-}
-
-# 跨平台 sed -i 替换函数
-portable_sed_inplace() {
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS (BSD sed)
-    sed -i '' "$@"
-  else
-    # Linux (GNU sed)
-    sed -i "$@"
-  fi
-}
+# 引入工具库
+source "$(dirname "$0")/utils.sh"
 
 # 检查依赖
 check_dependencies() {
@@ -96,7 +64,6 @@ read_skill_config() {
   REPO_NAME=$(jq -r ".repository.repo" "$config_file")
   
   INSTALLER_PKG=$(jq -r ".skills.\"$skill_name\".installer.packageName" "$config_file")
-  INSTALLER_SCOPE=$(jq -r ".skills.\"$skill_name\".installer.scope" "$config_file")
   INSTALLER_BIN=$(jq -r ".skills.\"$skill_name\".installer.binName" "$config_file")
   
   AUTHOR_NAME=$(jq -r ".skills.\"$skill_name\".author.name" "$config_file")
@@ -107,6 +74,10 @@ read_skill_config() {
   INSTALLER_DIR="$BUILD_DIR/installer"
   PACKAGE_NAME="${skill_name}-skill.tar.gz"
   RELEASE_TAG="${skill_name}-v${SKILL_VERSION}"
+  
+  # 全局变量定义（确保 set -u 不报错）
+  PACKAGE_SIZE=""
+  SHA256=""
 }
 
 # 检查 skill 文件
@@ -147,24 +118,22 @@ package_skill() {
   rm -rf "$staging_dir"
   mkdir -p "$skill_staging_dir"
   
-  # 读取要包含的文件
-  local include_files=$(jq -r ".skills.\"$SKILL_NAME\".files.include[]" skills.json)
-  
-  # 复制文件到暂存区
-  for file in $include_files; do
+  # 复制文件到暂存区 (修复空格文件遍历问题，避免子shell)
+  while read -r file; do
     if [ -e "$SKILL_DIR/$file" ]; then
       cp -R "$SKILL_DIR/$file" "$skill_staging_dir/"
     else
       log_warning "文件不存在，跳过: $SKILL_DIR/$file"
     fi
-  done
+  done < <(jq -r ".skills.\"$SKILL_NAME\".files.include[]" skills.json)
   
   # 清理排除的文件
-  find "$skill_staging_dir" -name "__pycache__" -type d -exec rm -rf {} +
-  find "$skill_staging_dir" -name "*.pyc" -delete
-  find "$skill_staging_dir" -name ".ruff_cache" -type d -exec rm -rf {} +
-  find "$skill_staging_dir" -name ".DS_Store" -delete
-  find "$skill_staging_dir" -name "node_modules" -type d -exec rm -rf {} +
+  # 使用 -prune 避免 'No such file or directory' 警告
+  find "$skill_staging_dir" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$skill_staging_dir" -name "*.pyc" -delete 2>/dev/null || true
+  find "$skill_staging_dir" -name ".ruff_cache" -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$skill_staging_dir" -name ".DS_Store" -delete 2>/dev/null || true
+  find "$skill_staging_dir" -name "node_modules" -type d -exec rm -rf {} + 2>/dev/null || true
   
   # 打包
   cd "$staging_dir"
@@ -174,7 +143,8 @@ package_skill() {
   # 清理暂存区
   rm -rf "$staging_dir"
   
-  local PACKAGE_SIZE=$(du -h "$BUILD_DIR/$PACKAGE_NAME" | cut -f1)
+  # 优化 du 输出处理 (使用 awk 提取第一列，更通用)
+  PACKAGE_SIZE=$(du -h "$BUILD_DIR/$PACKAGE_NAME" | awk '{print $1}')
   log_success "Skill 包已创建: $PACKAGE_SIZE"
   echo ""
 }
@@ -183,7 +153,7 @@ package_skill() {
 verify_package() {
   log_step "4/7" "验证包内容"
   
-  local FILE_COUNT=$(tar -tzf "$BUILD_DIR/$PACKAGE_NAME" | wc -l)
+  local FILE_COUNT=$(tar -tzf "$BUILD_DIR/$PACKAGE_NAME" | wc -l | awk '{print $1}')
   log_success "包含 $FILE_COUNT 个文件"
   
   echo ""
@@ -197,368 +167,71 @@ verify_package() {
 generate_installer() {
   log_step "5/7" "生成安装器"
   
-  # 从模板生成 install.js
-  cat > "$INSTALLER_DIR/install.js" <<'EOF'
-#!/usr/bin/env node
+  local TEMPLATE_FILE="$(dirname "$0")/templates/install.js.template"
+  local OUTPUT_FILE="$INSTALLER_DIR/install.js"
 
-/**
- * __SKILL_DISPLAY_NAME__ 自动安装器
- *
- * 使用方法:
- *   npx __INSTALLER_PKG__
- */
+  if [ ! -f "$TEMPLATE_FILE" ]; then
+    log_error "模板文件未找到: $TEMPLATE_FILE"
+  fi
 
-const fs = require("fs");
-const path = require("path");
-const { execSync } = require("child_process");
-const https = require("https");
-const os = require("os");
-
-const SKILL_NAME = "__SKILL_NAME__";
-const SKILL_VERSION = "__SKILL_VERSION__";
-const GITHUB_REPO = "__REPO_OWNER__/__REPO_NAME__";
-const RELEASE_TAG = "__RELEASE_TAG__";
-const PACKAGE_NAME = "__PACKAGE_NAME__";
-const RELEASE_URL = `https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}/${PACKAGE_NAME}`;
-
-// 颜色输出
-const colors = {
-  reset: "\x1b[0m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  red: "\x1b[31m",
-  cyan: "\x1b[36m",
-  gray: "\x1b[90m",
-};
-
-function log(message, color = "reset") {
-  console.log(`${colors[color]}${message}${colors.reset}`);
-}
-
-function logStep(step, message) {
-  log(`[${step}/6] ${message}`, "cyan");
-}
-
-function logSuccess(message) {
-  log(`✅ ${message}`, "green");
-}
-
-function logError(message) {
-  log(`❌ ${message}`, "red");
-}
-
-function logWarning(message) {
-  log(`⚠️  ${message}`, "yellow");
-}
-
-// 检测 skills 目录
-function getSkillsDir() {
-  const homeDir = os.homedir();
-  const skillsDir = path.join(homeDir, ".agents", "skills");
-
-  if (!fs.existsSync(skillsDir)) {
-    log("\n创建 skills 目录...", "gray");
-    fs.mkdirSync(skillsDir, { recursive: true });
-  }
-
-  return skillsDir;
-}
-
-// 检查是否已安装
-function checkExisting(skillsDir) {
-  const skillPath = path.join(skillsDir, SKILL_NAME);
-
-  if (fs.existsSync(skillPath)) {
-    logWarning(`检测到已安装的 ${SKILL_NAME} skill`);
-
-    const readline = require("readline").createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    return new Promise((resolve) => {
-      readline.question("是否覆盖安装? [y/N]: ", (answer) => {
-        readline.close();
-
-        if (answer.toLowerCase() === "y" || answer.toLowerCase() === "yes") {
-          log("正在删除旧版本...", "gray");
-          fs.rmSync(skillPath, { recursive: true, force: true });
-          resolve(true);
-        } else {
-          logError("安装已取消");
-          resolve(false);
-        }
-      });
-    });
-  }
-
-  return Promise.resolve(true);
-}
-
-// 下载并解压
-function downloadAndExtract(skillsDir) {
-  return new Promise((resolve, reject) => {
-    const tempFile = path.join(os.tmpdir(), PACKAGE_NAME);
-    const file = fs.createWriteStream(tempFile);
-    let requestCompleted = false;
-
-    log("下载 skill 包...", "gray");
-
-    const doDownload = (url) => {
-      const request = https.get(url, (response) => {
-        // 检查 HTTP 状态码
-        if (response.statusCode < 200 || response.statusCode >= 400) {
-          file.close();
-          if (fs.existsSync(tempFile)) {
-            fs.unlinkSync(tempFile);
-          }
-          requestCompleted = true;
-          reject(new Error(`下载失败: HTTP ${response.statusCode}`));
-          return;
-        }
-
-        if (response.statusCode === 302 || response.statusCode === 301) {
-          // 处理重定向
-          if (response.headers.location) {
-            doDownload(response.headers.location);
-          } else {
-            file.close();
-            if (fs.existsSync(tempFile)) {
-              fs.unlinkSync(tempFile);
-            }
-            requestCompleted = true;
-            reject(new Error("重定向缺少 Location 头"));
-          }
-          return;
-        }
-
-        response.pipe(file);
-
-        file.on("finish", () => {
-          file.close();
-
-          if (requestCompleted) return;
-
-          try {
-            log("解压文件...", "gray");
-            execSync(`tar -xzf ${tempFile} -C ${skillsDir}`, {
-              stdio: "inherit",
-            });
-            fs.unlinkSync(tempFile);
-            resolve();
-          } catch (error) {
-            if (fs.existsSync(tempFile)) {
-              fs.unlinkSync(tempFile);
-            }
-            reject(new Error(`解压失败: ${error.message}`));
-          }
-        });
-      });
-
-      // 设置 30 秒超时
-      request.setTimeout(30000, () => {
-        file.close();
-        if (fs.existsSync(tempFile)) {
-          fs.unlinkSync(tempFile);
-        }
-        requestCompleted = true;
-        request.destroy();
-        reject(new Error('下载超时 (30s)'));
-      });
-
-      request.on("error", (error) => {
-        file.close();
-        if (fs.existsSync(tempFile)) {
-          fs.unlinkSync(tempFile);
-        }
-        requestCompleted = true;
-        reject(new Error(`下载失败: ${error.message}`));
-      });
-    };
-
-    doDownload(RELEASE_URL);
-  });
-}
-
-// 验证安装
-function verifyInstallation(skillsDir) {
-  const skillPath = path.join(skillsDir, SKILL_NAME);
-  const requiredFiles = ["SKILL.md"];
-
-  for (const file of requiredFiles) {
-    const filePath = path.join(skillPath, file);
-    if (!fs.existsSync(filePath)) {
-      throw new Error(`缺少必需文件: ${file}`);
-    }
-  }
-
-  return skillPath;
-}
-
-// 检查系统依赖
-function checkDependencies() {
-  const deps = {
-    python3: false,
-    node: false,
-  };
-
-  try {
-    execSync("python3 --version", { stdio: "pipe" });
-    deps.python3 = true;
-  } catch (e) {
-    // Python 未安装
-  }
-
-  try {
-    execSync("node --version", { stdio: "pipe" });
-    deps.node = true;
-  } catch (e) {
-    // Node 未安装
-  }
-
-  return deps;
-}
-
-// 主安装流程
-async function main() {
-  console.log("\n" + "=".repeat(60));
-  log("🎨 __SKILL_DISPLAY_NAME__ 安装器", "cyan");
-  log(`版本: v${SKILL_VERSION}`, "gray");
-  console.log("=".repeat(60) + "\n");
-
-  try {
-    // Step 1: 检查系统依赖
-    logStep(1, "检查系统依赖");
-    const deps = checkDependencies();
-
-    if (deps.python3) {
-      logSuccess("Python 3 已安装");
-    } else {
-      logWarning("Python 3 未安装（某些功能需要）");
-      log("    安装方法: https://www.python.org/downloads/", "gray");
-    }
-
-    if (deps.node) {
-      logSuccess("Node.js 已安装");
-    } else {
-      logWarning("Node.js 未安装");
-      log("    安装方法: https://nodejs.org/", "gray");
-    }
-
-    console.log();
-
-    // Step 2: 确定安装目录
-    logStep(2, "确定安装目录");
-    const skillsDir = getSkillsDir();
-    logSuccess(`安装目录: ${skillsDir}`);
-    console.log();
-
-    // Step 3: 检查已存在的安装
-    logStep(3, "检查已有安装");
-    const shouldContinue = await checkExisting(skillsDir);
-    if (!shouldContinue) {
-      process.exit(0);
-    }
-    console.log();
-
-    // Step 4: 下载并解压
-    logStep(4, "下载 skill 包");
-    await downloadAndExtract(skillsDir);
-    logSuccess("下载完成");
-    console.log();
-
-    // Step 5: 验证安装
-    logStep(5, "验证安装");
-    const skillPath = verifyInstallation(skillsDir);
-    logSuccess("验证通过");
-    console.log();
-
-    // Step 6: 完成
-    logStep(6, "完成安装");
-    logSuccess("设置完成");
-    console.log();
-
-    // 安装成功
-    console.log("=".repeat(60));
-    logSuccess("__SKILL_DISPLAY_NAME__ 安装成功！");
-    console.log("=".repeat(60) + "\n");
-
-    log("📍 安装位置:", "cyan");
-    log(`   ${skillPath}\n`, "gray");
-
-    log("📚 快速开始:", "cyan");
-    log('   在对话中使用此 skill', "gray");
-    log("   Agent 会自动调用\n", "gray");
-
-    log("📖 查看文档:", "cyan");
-    log(`   cat ${path.join(skillPath, "README.md")}\n`, "gray");
-
-    if (!deps.python3 || !deps.node) {
-      logWarning("提醒: 某些功能需要安装缺失的依赖");
-    }
-  } catch (error) {
-    console.log();
-    logError(`安装失败: ${error.message}`);
-    console.log();
-    log("💡 故障排除:", "yellow");
-    log("   1. 检查网络连接", "gray");
-    log("   2. 确认有写入权限", "gray");
-    log("   3. 查看详细错误信息", "gray");
-    console.log();
-    process.exit(1);
-  }
-}
-
-// 运行安装
-if (require.main === module) {
-  main();
-}
-
-module.exports = { main };
-EOF
+  # 复制模板
+  cp "$TEMPLATE_FILE" "$OUTPUT_FILE"
 
   # 替换占位符
-  portable_sed_inplace "s|__SKILL_NAME__|$SKILL_NAME|g" "$INSTALLER_DIR/install.js"
-  portable_sed_inplace "s|__SKILL_DISPLAY_NAME__|$SKILL_DISPLAY_NAME|g" "$INSTALLER_DIR/install.js"
-  portable_sed_inplace "s|__SKILL_VERSION__|$SKILL_VERSION|g" "$INSTALLER_DIR/install.js"
-  portable_sed_inplace "s|__REPO_OWNER__|$REPO_OWNER|g" "$INSTALLER_DIR/install.js"
-  portable_sed_inplace "s|__REPO_NAME__|$REPO_NAME|g" "$INSTALLER_DIR/install.js"
-  portable_sed_inplace "s|__RELEASE_TAG__|$RELEASE_TAG|g" "$INSTALLER_DIR/install.js"
-  portable_sed_inplace "s|__PACKAGE_NAME__|$PACKAGE_NAME|g" "$INSTALLER_DIR/install.js"
-  portable_sed_inplace "s|__INSTALLER_PKG__|$INSTALLER_PKG|g" "$INSTALLER_DIR/install.js"
+  # 注意：在 Linux 和 macOS 上 sed 行为可能略有不同，utils.sh 提供了 portable_sed_inplace
   
-  # 生成 package.json
-  cat > "$INSTALLER_DIR/package.json" <<EOF
-{
-  "name": "$INSTALLER_PKG",
-  "version": "$SKILL_VERSION",
-  "description": "$SKILL_DESC",
-  "main": "install.js",
-  "bin": {
-    "$INSTALLER_BIN": "install.js"
-  },
-  "scripts": {
-    "test": "node install.js"
-  },
-  "keywords": $(jq -c ".skills.\"$SKILL_NAME\".keywords" skills.json),
-  "author": {
-    "name": "$AUTHOR_NAME",
-    "email": "$AUTHOR_EMAIL"
-  },
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/$REPO_OWNER/$REPO_NAME.git",
-    "directory": "skills/$SKILL_NAME"
-  },
-  "bugs": {
-    "url": "https://github.com/$REPO_OWNER/$REPO_NAME/issues"
-  },
-  "homepage": "https://github.com/$REPO_OWNER/$REPO_NAME/tree/main/skills/$SKILL_NAME"
-}
-EOF
+  # 转义特殊字符，防止 sed 报错
+  local SAFE_SKILL_NAME=$(escape_sed_pattern "$SKILL_NAME")
+  local SAFE_SKILL_DISPLAY_NAME=$(escape_sed_pattern "$SKILL_DISPLAY_NAME")
+  local SAFE_SKILL_VERSION=$(escape_sed_pattern "$SKILL_VERSION")
+  local SAFE_REPO_OWNER=$(escape_sed_pattern "$REPO_OWNER")
+  local SAFE_REPO_NAME=$(escape_sed_pattern "$REPO_NAME")
+  local SAFE_RELEASE_TAG=$(escape_sed_pattern "$RELEASE_TAG")
+  local SAFE_PACKAGE_NAME=$(escape_sed_pattern "$PACKAGE_NAME")
+  local SAFE_INSTALLER_PKG=$(escape_sed_pattern "$INSTALLER_PKG")
 
-  chmod +x "$INSTALLER_DIR/install.js"
+  portable_sed_inplace "s/__SKILL_NAME__/$SAFE_SKILL_NAME/g" "$OUTPUT_FILE"
+  portable_sed_inplace "s/__SKILL_DISPLAY_NAME__/$SAFE_SKILL_DISPLAY_NAME/g" "$OUTPUT_FILE"
+  portable_sed_inplace "s/__SKILL_VERSION__/$SAFE_SKILL_VERSION/g" "$OUTPUT_FILE"
+  portable_sed_inplace "s/__REPO_OWNER__/$SAFE_REPO_OWNER/g" "$OUTPUT_FILE"
+  portable_sed_inplace "s/__REPO_NAME__/$SAFE_REPO_NAME/g" "$OUTPUT_FILE"
+  portable_sed_inplace "s/__RELEASE_TAG__/$SAFE_RELEASE_TAG/g" "$OUTPUT_FILE"
+  portable_sed_inplace "s/__PACKAGE_NAME__/$SAFE_PACKAGE_NAME/g" "$OUTPUT_FILE"
+  portable_sed_inplace "s/__INSTALLER_PKG__/$SAFE_INSTALLER_PKG/g" "$OUTPUT_FILE"
+
+  # 生成 package.json (使用 jq 构建 JSON 对象，更安全)
+  # 安全读取 keywords，如果为空或不存在则返回 []
+  local KEYWORDS_JSON=$(jq -c ".skills.\"$SKILL_NAME\".keywords // []" skills.json)
+  
+  # 使用 jq 构建完整的 package.json 内容
+  jq -n \
+    --arg name "$INSTALLER_PKG" \
+    --arg version "$SKILL_VERSION" \
+    --arg description "$SKILL_DESC" \
+    --arg binName "$INSTALLER_BIN" \
+    --argjson keywords "$KEYWORDS_JSON" \
+    --arg authorName "$AUTHOR_NAME" \
+    --arg authorEmail "$AUTHOR_EMAIL" \
+    --arg repoUrl "https://github.com/$REPO_OWNER/$REPO_NAME.git" \
+    --arg repoDir "skills/$SKILL_NAME" \
+    --arg bugsUrl "https://github.com/$REPO_OWNER/$REPO_NAME/issues" \
+    --arg homepage "https://github.com/$REPO_OWNER/$REPO_NAME/tree/main/skills/$SKILL_NAME" \
+    '{
+      name: $name,
+      version: $version,
+      description: $description,
+      main: "install.js",
+      bin: { ($binName): "install.js" },
+      scripts: { test: "node install.js" },
+      keywords: $keywords,
+      author: { name: $authorName, email: $authorEmail },
+      license: "MIT",
+      repository: { type: "git", url: $repoUrl, directory: $repoDir },
+      bugs: { url: $bugsUrl },
+      homepage: $homepage
+    }' > "$INSTALLER_DIR/package.json"
+
+  chmod +x "$OUTPUT_FILE"
   
   log_success "安装器已生成"
   echo ""
@@ -569,8 +242,13 @@ generate_checksum() {
   log_step "6/7" "生成校验和"
   
   cd "$BUILD_DIR"
-  shasum -a 256 "$PACKAGE_NAME" > "$PACKAGE_NAME.sha256"
-  local SHA256=$(cat "$PACKAGE_NAME.sha256" | cut -d' ' -f1)
+  
+  # 获取跨平台 SHA256 命令
+  local SHA256_CMD
+  SHA256_CMD=$(get_sha256_cmd)
+  $SHA256_CMD "$PACKAGE_NAME" > "$PACKAGE_NAME.sha256"
+  
+  SHA256=$(cat "$PACKAGE_NAME.sha256" | cut -d' ' -f1)
   cd - > /dev/null
   
   log_success "SHA256: $SHA256"
@@ -718,6 +396,11 @@ main() {
   # 处理 --all
   if [ "$1" = "--all" ]; then
     log_error "--all 功能暂未实现，请逐个发布 skill"
+  fi
+  
+  # 校验版本号格式
+  if [[ ! "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log_error "版本号格式错误: '$2'\n应符合语义化版本规范: X.Y.Z (例如 1.0.0)"
   fi
   
   # 读取配置
