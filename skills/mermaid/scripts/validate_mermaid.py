@@ -17,6 +17,7 @@ Mermaid 图表验证工具
         1 - 验证失败或错误
 """
 
+import argparse
 import glob
 import os
 import re
@@ -493,25 +494,6 @@ class MermaidValidator:
 
         return result
 
-        result["has_theme"] = True
-
-        # 提取主题名称
-        theme_match = re.search(r"'theme'\s*:\s*'([^']+)'", content)
-        if theme_match:
-            theme = theme_match.group(1)
-            result["theme"] = theme
-
-            # 检测 default 主题的兼容性问题
-            if theme == "default":
-                result["warnings"].append("default主题在深色背景下连接线对比度可能不足")
-                result["suggestions"].append(
-                    "如果在dark模式编辑器中查看，建议切换到 dark 或 forest 主题"
-                )
-            elif theme == "dark":
-                result["suggestions"].append("dark主题适合深色背景，浅色背景下可能过暗")
-
-        return result
-
     def _check_color_contrast(self, content: str) -> Dict[str, Any]:
         """检查颜色对比度"""
         result = {"checked": False, "issues": [], "suggestions": []}
@@ -650,14 +632,6 @@ class MermaidValidator:
             # 将对比度检查结果添加到返回值中
             pass  # 将在返回字典时添加
 
-        return {
-            "score": score,
-            "grade": self._get_grade(score),
-            "issues": issues,
-            "suggestions": suggestions,
-            "contrast_check": contrast_check,
-        }
-
         # 8. 复杂度扣分（分级标准）
         recommended_nodes = complexity.get("recommended_nodes", 20)
         maximum_nodes = complexity.get("maximum_nodes", 50)
@@ -689,6 +663,7 @@ class MermaidValidator:
             "grade": self._get_grade(score),
             "issues": issues,
             "suggestions": suggestions,
+            "contrast_check": contrast_check,
         }
 
     def _get_grade(self, score: int) -> str:
@@ -880,76 +855,57 @@ class MermaidValidator:
 
 def main():
     """主函数"""
-    # 解析参数
-    if len(sys.argv) < 2:
-        print("Mermaid 图表验证工具")
-        print()
+    parser = argparse.ArgumentParser(description="Mermaid 图表验证工具")
+    parser.add_argument("filepath", help="Mermaid 图表文件路径")
+    parser.add_argument("-v", "--verbose", action="store_true", help="显示详细信息")
+    parser.add_argument(
+        "-s",
+        "--strict",
+        action="store_true",
+        help="严格模式（使用推荐标准：节点<20, 深度<5, 标签<10字）",
+    )
+    parser.add_argument(
+        "-y",
+        "--auto-install",
+        action="store_true",
+        help="自动安装依赖（不询问）",
+    )
+    parser.add_argument(
+        "--move-to",
+        metavar="PATH",
+        help="验证通过后将文件移动到指定路径",
+    )
 
-        print(
-            "用法：python3 validate_mermaid.py <diagram.md> [--verbose] [--strict] [--move-to <path>]"
-        )
-        print()
-        print("参数：")
-        print("  <diagram.md>  Mermaid 图表文件路径")
-        print("  --verbose      显示详细信息")
-        print("  --strict       严格模式（使用推荐标准：节点<20, 深度<5, 标签<10字）")
-        print("  --move-to      验证通过后将文件移动到指定路径（用于并行执行原子操作）")
-        print()
-        print("示例：")
-        print("  python3 validate_mermaid.py docs/architecture.md")
-        print("  python3 validate_mermaid.py diagram.md --verbose")
-        print("  python3 validate_mermaid.py diagram.md --strict")
-        print(
-            "  python3 validate_mermaid.py /tmp/architecture.md --move-to docs/architecture.md"
-        )
-
-    filepath = sys.argv[1]
-    verbose = "--verbose" in sys.argv or "-v" in sys.argv
-    strict = "--strict" in sys.argv or "-s" in sys.argv
-    auto_install = "--auto-install" in sys.argv or "-y" in sys.argv
-    move_to = None
-
-    # 解析 --move-to 参数
-    try:
-        if "--move-to" in sys.argv:
-            idx = sys.argv.index("--move-to")
-            if idx + 1 < len(sys.argv):
-                move_to = sys.argv[idx + 1]
-            else:
-                print("❌ --move-to 需要指定目标路径")
-                sys.exit(1)
-    except (ValueError, IndexError):
-        print("❌ 参数解析错误")
-        sys.exit(1)
+    args = parser.parse_args()
 
     # 检查文件
-    if not os.path.exists(filepath):
-        print(f"❌ 文件不存在: {filepath}")
+    if not os.path.exists(args.filepath):
+        print(f"❌ 文件不存在: {args.filepath}")
         sys.exit(1)
 
     # 创建验证器
     validator = MermaidValidator()
-    validator.auto_install = auto_install
-    validator.strict_mode = strict
+    validator.auto_install = args.auto_install
+    validator.strict_mode = args.strict
 
     # 检查并安装 CLI
     if not validator.check_and_install_cli():
         sys.exit(1)
 
     # 执行验证
-    passed, _ = validator.validate_file(filepath, verbose)
+    passed, _ = validator.validate_file(args.filepath, args.verbose)
 
     # 验证通过后移动文件
-    if passed and move_to:
+    if passed and args.move_to:
         try:
             # 确保目标目录存在
-            target_dir = os.path.dirname(move_to)
+            target_dir = os.path.dirname(args.move_to)
             if target_dir and not os.path.exists(target_dir):
                 os.makedirs(target_dir, exist_ok=True)
 
-            shutil.move(filepath, move_to)
-            if verbose:
-                print(f"   [移动] 文件已移动到: {move_to}")
+            shutil.move(args.filepath, args.move_to)
+            if args.verbose:
+                print(f"   [移动] 文件已移动到: {args.move_to}")
         except Exception as e:
             print(f"❌ 移动文件失败: {e}")
             sys.exit(1)

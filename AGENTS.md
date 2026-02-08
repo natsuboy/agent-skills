@@ -2,35 +2,62 @@
 
 本文档为 agentic coding agents 提供在 agent-skills 仓库中工作的指导规范。
 
-## 1. 构建/Lint/测试命令
+## 1. 构建/验证/发布命令
 
 ### 1.1 核心管理命令
 
 ```bash
-./scripts/init.sh                       # 初始化仓库
-./scripts/create_skill.sh <skill-name> # 创建新 Skill
-./scripts/publish.sh <skill-name> <version> # 发布 Skill
+make help                                # 查看所有可用命令
+make init                                # 初始化仓库
+make create SKILL_NAME=mermaid           # 创建新 Skill
+make tag SKILL_NAME=mermaid VERSION=1.0.0 # 打标并发布 Skill
 ```
 
-### 1.2 代码检查命令
+### 1.2 Skill 验证和预览命令
 
 ```bash
-# Python Lint（使用 Ruff）
-ruff check .                    # 检查所有 Python 文件
-ruff check --fix .              # 自动修复问题
-# Bash 脚本检查
-shellcheck scripts/*.sh         # 需先安装 shellcheck
+# 验证单个 skill
+make validate SKILL_NAME=mermaid
+
+# 验证所有 skills
+make validate-all
+
+# 预览单个 skill
+make preview SKILL_NAME=mermaid
+
+# 列出所有 skills
+make preview-all
 ```
 
-### 1.3 验证命令
+### 1.3 Skill 发布命令
 
 ```bash
-# Mermaid 验证（仅 mermaid skill）
-python3 skills/mermaid/scripts/validate_mermaid.py diagram.md
-python3 skills/mermaid/scripts/validate_mermaid.py diagram.md --verbose
+# 完整发布流程（验证 + 打标 + 推送）
+make publish SKILL_NAME=mermaid VERSION=1.0.0
+
+# 为单个 skill 打标
+make tag SKILL_NAME=mermaid VERSION=1.0.0
+
+# 批量为所有 skills 打标
+make tag-all
 ```
 
-**注意**：当前项目没有自动化测试框架。测试通过手动运行脚本验证功能。
+**发布流程说明**：
+1. `tag_skill.sh` 验证 skill 符合规范
+2. 创建 Git tag（格式：`<skill-name>-v<version>`）
+3. 推送 tag 到远程仓库
+4. **GitHub Actions 自动创建 Release**
+5. 用户可通过 `npx skills` 安装
+
+### 1.4 代码检查命令
+
+```bash
+# 运行所有检查
+make lint
+
+# 自动修复问题
+make lint-fix
+```
 
 ---
 
@@ -86,7 +113,7 @@ from typing import List, Dict, Tuple, Any
 
 ### 2.3 Markdown 文档规范
 
-**章节编号**：必须从 1 开始连续递增，## 为主章节，### 为子章节
+**章节编号**：必须从 1 开始连续递归，## 为主章节，### 为子章节
 
 **格式要求**：中文段落，代码块指定语言，表格对齐，添加目录，关键代码加中文注释
 
@@ -116,7 +143,7 @@ skills/<skill-name>/
 - 对话和文档语言：简体中文（代码和专业术语除外）
 - 关键代码：必须加详细中文注释
 - 文档格式：美观，使用表格/列表/代码块
-- 章节编号：从 1 开始连续递增
+- 章节编号：从 1 开始连续递归
 **注释规范**：
 - Bash：单行 `# 注释` 或块注释说明功能
 - Python：使用 docstring，包含 Args 和 Returns
@@ -131,9 +158,63 @@ skills/<skill-name>/
 
 **分支规范**：`main`（稳定）、`develop`（开发）、`feature/skill-name`（功能）、`fix/issue-name`（修复）
 
+**Tag 格式**：`<skill-name>-v<version>`（例如：`mermaid-v1.0.0`）
+
 ---
 
-## 5. 验证清单
+## 5. 开发工作流
+
+### 5.1 新 Skill 开发流程
+
+```bash
+# 1. 创建 skill 框架
+make create SKILL_NAME=my-new-skill
+
+# 2. 编辑 SKILL.md（必须包含 YAML frontmatter）
+# 示例：
+# ---
+# name: my-new-skill
+# description: 我的技能描述
+# ---
+
+# 3. 实现功能和文档
+
+# 4. 验证 skill
+make validate SKILL_NAME=my-new-skill
+
+# 5. 预览效果
+make preview SKILL_NAME=my-new-skill
+
+# 6. 提交代码
+make commit MESSAGE="feat(my-new-skill): 添加新技能"
+make push
+
+# 7. 打标并发布
+make publish SKILL_NAME=my-new-skill VERSION=1.0.0
+```
+
+### 5.2 现有 Skill 修改流程
+
+```bash
+# 1. 修改代码/文档
+
+# 2. 验证修改
+make validate SKILL_NAME=mermaid
+
+# 3. 预览效果
+make preview SKILL_NAME=mermaid
+
+# 4. 提交代码
+make commit MESSAGE="fix(mermaid): 修复语法错误"
+make push
+
+# 5. 打新版本
+make tag SKILL_NAME=mermaid VERSION=1.1.0
+```
+
+---
+
+## 6. 验证清单
 
 提交前确保：
 - ✓ 所有脚本有 Shebang 和头部注释
@@ -143,17 +224,130 @@ skills/<skill-name>/
 - ✓ 关键代码有中文注释
 - ✓ JSON 格式正确
 - ✓ 文件命名遵循约定
+- ✓ **SKILL.md 包含正确的 YAML frontmatter**
+- ✓ **通过 `./scripts/validate_skill.sh` 验证**
 
 ---
 
-## 6. 常见问题
+## 7. 常见问题
 
-**Q: 如何测试脚本？** 直接运行 `./scripts/script-name.sh`
+**Q: 如何使用 Make？**
+运行 `make help` 查看所有可用命令。示例：
+- `make validate SKILL_NAME=mermaid`
+- `make tag SKILL_NAME=mermaid VERSION=1.0.0`
+- `make publish SKILL_NAME=mermaid VERSION=1.0.0`
 
-**Q: Python 环境要求？** Python 3.8+，部分功能需 Node.js
+**Q: 如何测试脚本？**
+使用 `make <command>`
 
-**Q: 如何调试 Bash？** 使用 `bash -x script-name.sh`
+**Q: Python 环境要求？**
+Python 3.8+，部分功能需 Node.js
 
-**Q: 需要运行 lint 吗？** 运行 `ruff check --fix .` 检查 Python 代码
+**Q: 如何调试 Bash？**
+使用 `bash -x script-name.sh`
 
-**Q: 项目有测试吗？** 当前无自动化测试，手动运行脚本验证功能
+**Q: 需要运行 lint 吗？**
+运行 `make lint` 或 `ruff check --fix .` 检查 Python 代码
+
+**Q: 项目有测试吗？**
+当前无自动化测试，手动运行脚本验证功能
+
+**Q: 如何发布 skill？**
+运行 `make tag SKILL_NAME=mermaid VERSION=1.0.0`，GitHub Actions 会自动创建 Release
+
+**Q: tag 格式是什么？**
+`<skill-name>-v<version>`，例如：`mermaid-v1.0.0`
+
+**Q: 如何验证 skill？**
+运行 `make validate SKILL_NAME=mermaid`
+
+**Q: 如何预览 skill？**
+运行 `make preview SKILL_NAME=mermaid`
+
+---
+
+## 8. 工具函数说明
+
+### 8.1 utils.sh 提供的函数
+
+**日志函数**：
+- `log_step [step_num] "message"` - 输出步骤信息
+- `log_success "message"` - 输出成功信息
+- `log_error "message"` - 输出错误信息并退出
+- `log_warning "message"` - 输出警告信息
+
+**工具函数**：
+- `validate_version "version"` - 验证语义化版本号
+- `extract_yaml_field "skill_dir" "field"` - 提取 SKILL.md 中的字段
+- `get_skill_config "skill_name" "field"` - 获取 skills.json 配置
+- `get_all_skills` - 获取所有 skill 名称列表
+- `skill_exists "skill_name"` - 检查 skill 是否存在
+- `validate_yaml_frontmatter "skill_file"` - 验证 YAML frontmatter 格式
+- `generate_release_notes "skill_name" "version"` - 生成 Release Notes
+
+**跨平台函数**：
+- `portable_sed_inplace "pattern" "file"` - 跨平台 sed 替换
+- `escape_sed_pattern "text"` - 转义 sed 特殊字符
+- `get_sha256_cmd` - 获取 SHA256 命令
+- `check_command "command"` - 检查命令是否存在
+
+---
+
+## 9. GitHub Actions 工作流
+
+### 9.1 自动发布工作流
+
+**触发条件**：推送 tag 格式为 `*-v*`（例如：`mermaid-v1.0.0`）
+
+**执行流程**：
+1. 解析 tag 名称，提取 skill name 和 version
+2. 验证 skill 目录存在
+3. 运行 `validate_skill.sh` 验证
+4. 生成 Release Notes
+5. 创建 GitHub Release
+
+**查看 Release**：访问 `https://github.com/natsuboy/agent-skills/releases`
+
+---
+
+## 10. skills.sh 生态集成
+
+本项目完全兼容 [skills.sh](https://skills.sh) 生态系统。
+
+### 10.1 目录结构要求
+
+skills.sh 会扫描以下位置：
+- `skills/`（推荐）
+- `skills/.curated/`
+- `skills/.experimental/`
+- `skills/.system/`
+- 根目录（如果包含 SKILL.md）
+
+### 10.2 SKILL.md 格式要求
+
+```yaml
+---
+name: skill-name
+description: 简短描述
+metadata:
+  internal: true  # 可选，设为 true 隐藏该 skill
+---
+# Skill 文档内容
+```
+
+**必需字段**：
+- `name`：唯一标识符（小写，允许连字符）
+- `description`：简要说明
+
+### 10.3 用户安装
+
+```bash
+# 安装所有 skills
+npx skills add natsuboy/agent-skills
+
+# 安装特定 skill
+npx skills add natsuboy/agent-skills --skill mermaid
+
+# 列出可用 skills
+npx skills add natsuboy/agent-skills --list
+```

@@ -48,20 +48,85 @@ escape_sed_pattern() {
   echo "$1" | sed 's/[&/\]/\\&/g'
 }
 
-# 获取 SHA256 命令
-get_sha256_cmd() {
-  if command -v shasum &> /dev/null; then
-    echo "shasum -a 256"
-  elif command -v sha256sum &> /dev/null; then
-    echo "sha256sum"
-  else
-    log_error "Neither shasum nor sha256sum found. Please install coreutils (Linux) or check your path."
-  fi
-}
-
 # 检查命令是否存在
 check_command() {
   if ! command -v "$1" &> /dev/null; then
     log_error "Missing dependency: $1\nInstall it via: brew install $1 (macOS) or apt-get install $1 (Linux)"
+  fi
+}
+
+# 验证版本号格式（语义化版本）
+validate_version() {
+  local version="$1"
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log_error "版本号格式错误: '$version'\n应符合语义化版本规范: X.Y.Z (例如 1.0.0)"
+  fi
+}
+
+# 提取 SKILL.md 的 YAML frontmatter 字段
+extract_yaml_field() {
+  local skill_dir="$1"
+  local field="$2"
+  local skill_file="$skill_dir/SKILL.md"
+
+  if [ ! -f "$skill_file" ]; then
+    echo ""
+    return
+  fi
+
+  # 提取 YAML frontmatter 中的字段
+  awk 'BEGIN {p=0}
+  /^---$/ {if (p) exit; else {p=1; next}}
+  p && /'"$field"':/ {
+    sub(/'"$field"':[[:space:]]*/, "")
+    if (!/^[|>]/) {
+      print
+      exit
+    }
+    next
+  }
+  p && /^[[:space:]]/ && !/^[[:space:]]*[|>]/ {
+    print
+  }' "$skill_file" | head -20 | sed 's/^[[:space:]]*//' | tr '\n' ' ' | xargs
+}
+
+# 获取 skills.json 中的 skill 配置
+get_skill_config() {
+  local skill_name="$1"
+  local field="$2"
+
+  jq -r ".skills.\"$skill_name\".$field // \"\"" skills.json 2>/dev/null
+}
+
+# 获取所有 skill 名称列表
+get_all_skills() {
+  jq -r '.skills | keys[]' skills.json 2>/dev/null
+}
+
+# 检查 skill 是否存在
+skill_exists() {
+  local skill_name="$1"
+  [ -d "skills/$skill_name" ] && [ -f "skills/$skill_name/SKILL.md" ]
+}
+
+# 验证 YAML frontmatter 格式
+validate_yaml_frontmatter() {
+  local skill_file="$1"
+
+  # 检查是否有 --- 包围的 frontmatter
+  if ! grep -q "^---$" "$skill_file"; then
+    log_error "SKILL.md 缺少 YAML frontmatter（必须用 --- 包围）"
+  fi
+
+  # 检查必需字段
+  local name=$(extract_yaml_field "$(dirname "$skill_file")" "name")
+  local description=$(extract_yaml_field "$(dirname "$skill_file")" "description")
+
+  if [ -z "$name" ]; then
+    log_error "SKILL.md 缺少必需字段: name"
+  fi
+
+  if [ -z "$description" ]; then
+    log_error "SKILL.md 缺少必需字段: description"
   fi
 }

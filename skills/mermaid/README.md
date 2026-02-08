@@ -14,7 +14,7 @@
 
 ```bash
 # 自动安装
-npx mermaid-skill-installer
+npx skills add natsuboy/agent-skills --skill mermaid
 ```
 
 ## 🚀 快速使用
@@ -50,7 +50,7 @@ npx mermaid-skill-installer
 
 - [Mermaid 官方文档](https://mermaid.js.org/)
 - [Mermaid Live Editor](https://mermaid.live/)
-- [问题反馈](https://github.com/YOUR_USERNAME/agent-skills/issues)
+- [问题反馈](https://github.com/natsuboy/agent-skills/issues)
 
 ---
 

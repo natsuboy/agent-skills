@@ -108,18 +108,60 @@ log_step "Updating documentation placeholders..."
 find . -name "*.md" -not -path "*/node_modules/*" -not -path "*/.git/*" | while read -r file; do
   UPDATED=false
   
+  # --- 处理 Owner ---
+  SAFE_OWNER=$(escape_sed_pattern "$OWNER")
+  
+  # 1. 替换默认占位符
   if grep -q "YOUR_USERNAME" "$file"; then
-    SAFE_OWNER=$(escape_sed_pattern "$OWNER")
     portable_sed_inplace "s/YOUR_USERNAME/$SAFE_OWNER/g" "$file"
     UPDATED=true
   fi
   
-  # 仅当 REPO 确实改变时才替换，且增加单词边界保护（如果可能），或简单字符串替换但需小心
-  # 这里为了安全，我们只替换完全匹配 "agent-skills" 的字符串
+  # 2. 替换旧值 (修复模式：如果当前配置的值与新输入不同，替换旧值)
+  if [ "$CURRENT_OWNER" != "YOUR_USERNAME" ] && [ "$CURRENT_OWNER" != "$OWNER" ]; then
+    if grep -q "$CURRENT_OWNER" "$file"; then
+      SAFE_OLD_OWNER=$(escape_sed_pattern "$CURRENT_OWNER")
+      portable_sed_inplace "s/$SAFE_OLD_OWNER/$SAFE_OWNER/g" "$file"
+      UPDATED=true
+    fi
+  fi
+  
+  # --- 处理 Repo ---
+  SAFE_REPO=$(escape_sed_pattern "$REPO")
+  
+  # 1. 替换默认占位符
   if [ "$REPO" != "agent-skills" ] && grep -q "agent-skills" "$file"; then
-    SAFE_REPO=$(escape_sed_pattern "$REPO")
     portable_sed_inplace "s/agent-skills/$SAFE_REPO/g" "$file"
     UPDATED=true
+  fi
+  
+  # 2. 替换旧值
+  if [ "$CURRENT_REPO" != "agent-skills" ] && [ "$CURRENT_REPO" != "$REPO" ]; then
+    if grep -q "$CURRENT_REPO" "$file"; then
+      SAFE_OLD_REPO=$(escape_sed_pattern "$CURRENT_REPO")
+      portable_sed_inplace "s/$SAFE_OLD_REPO/$SAFE_REPO/g" "$file"
+      UPDATED=true
+    fi
+  fi
+
+  # --- 处理 Author Name ---
+  SAFE_AUTHOR_NAME=$(escape_sed_pattern "$AUTHOR_NAME")
+  if [ "$CURRENT_AUTHOR_NAME" != "$AUTHOR_NAME" ] && [ -n "$CURRENT_AUTHOR_NAME" ]; then
+    if grep -q "$CURRENT_AUTHOR_NAME" "$file"; then
+      SAFE_OLD_AUTHOR_NAME=$(escape_sed_pattern "$CURRENT_AUTHOR_NAME")
+      portable_sed_inplace "s/$SAFE_OLD_AUTHOR_NAME/$SAFE_AUTHOR_NAME/g" "$file"
+      UPDATED=true
+    fi
+  fi
+
+  # --- 处理 Author Email ---
+  SAFE_AUTHOR_EMAIL=$(escape_sed_pattern "$AUTHOR_EMAIL")
+  if [ "$CURRENT_AUTHOR_EMAIL" != "$AUTHOR_EMAIL" ] && [ -n "$CURRENT_AUTHOR_EMAIL" ]; then
+    if grep -q "$CURRENT_AUTHOR_EMAIL" "$file"; then
+      SAFE_OLD_AUTHOR_EMAIL=$(escape_sed_pattern "$CURRENT_AUTHOR_EMAIL")
+      portable_sed_inplace "s/$SAFE_OLD_AUTHOR_EMAIL/$SAFE_AUTHOR_EMAIL/g" "$file"
+      UPDATED=true
+    fi
   fi
   
   if [ "$UPDATED" = true ]; then

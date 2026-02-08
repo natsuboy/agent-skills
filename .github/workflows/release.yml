@@ -1,0 +1,155 @@
+name: Release Skill
+
+on:
+  push:
+    tags:
+      - '*-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse tag
+        id: parse_tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          SKILL_NAME=$(echo "$TAG" | sed -E 's/-v[0-9]+\.[0-9]+\.[0-9]+$//')
+          VERSION=$(echo "$TAG" | sed -E 's/.*-v([0-9]+\.[0-9]+\.[0-9]+)$/\1/')
+
+          if [ -z "$SKILL_NAME" ] || [ -z "$VERSION" ]; then
+            echo "无法解析 tag: $TAG"
+            echo "期望格式: skill-name-vX.Y.Z"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "skill_name=$SKILL_NAME" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          echo "解析结果:"
+          echo "  Tag: $TAG"
+          echo "  Skill: $SKILL_NAME"
+          echo "  Version: $VERSION"
+
+      - name: Verify skill exists
+        run: |
+          SKILL_NAME="${{ steps.parse_tag.outputs.skill_name }}"
+
+          if [ ! -d "skills/$SKILL_NAME" ]; then
+            echo "错误: Skill 目录不存在: skills/$SKILL_NAME"
+            exit 1
+          fi
+
+          if [ ! -f "skills/$SKILL_NAME/SKILL.md" ]; then
+            echo "错误: SKILL.md 不存在: skills/$SKILL_NAME/SKILL.md"
+            exit 1
+          fi
+
+          echo "✓ Skill 验证通过"
+
+      - name: Run validation script
+        run: |
+          SKILL_NAME="${{ steps.parse_tag.outputs.skill_name }}"
+          ./scripts/validate_skill.sh "$SKILL_NAME"
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          SKILL_NAME="${{ steps.parse_tag.outputs.skill_name }}"
+          VERSION="${{ steps.parse_tag.outputs.version }}"
+
+          DISPLAY_NAME=$(jq -r ".skills.\"$SKILL_NAME\".displayName" skills.json)
+          DESCRIPTION=$(jq -r ".skills.\"$SKILL_NAME\".description" skills.json)
+          REPO_OWNER=$(jq -r ".repository.owner" skills.json)
+          REPO_NAME=$(jq -r ".repository.repo" skills.json)
+
+          {
+            echo "# ${DISPLAY_NAME} v${VERSION}"
+            echo ""
+            echo "发布于 $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 📦 安装"
+            echo ""
+            echo "### 使用 skills.sh CLI（推荐）"
+            echo ""
+            echo '```bash'
+            echo "npx skills add ${REPO_OWNER}/${REPO_NAME} --skill ${SKILL_NAME}"
+            echo '```'
+            echo ""
+            echo "### 手动安装"
+            echo ""
+            echo '```bash'
+            echo "# 克隆仓库"
+            echo "git clone https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+            echo ""
+            echo "# 复制 skill 到你的 agent 的 skills 目录"
+            echo "cp -r ${REPO_NAME}/skills/${SKILL_NAME} ~/.claude/skills/"
+            echo ""
+            echo "# 或复制到项目目录"
+            echo "cp -r ${REPO_NAME}/skills/${SKILL_NAME} .claude/skills/"
+            echo '```'
+            echo ""
+            echo "---"
+            echo ""
+            echo "## ✨ 说明"
+            echo ""
+            echo "${DESCRIPTION}"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 🔗 相关链接"
+            echo ""
+            echo "- **GitHub 仓库**: https://github.com/${REPO_OWNER}/${REPO_NAME}"
+            echo "- **Skill 目录**: https://github.com/${REPO_OWNER}/${REPO_NAME}/tree/main/skills/${SKILL_NAME}"
+            echo "- **问题反馈**: https://github.com/${REPO_OWNER}/${REPO_NAME}/issues"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 📝 更新日志"
+            echo ""
+            echo "### v${VERSION}"
+            echo ""
+            echo "- 初始发布"
+          } > release_notes.md
+
+          echo "✓ Release notes 已生成"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "${{ steps.parse_tag.outputs.skill_name }} v${{ steps.parse_tag.outputs.version }}"
+          tag_name: "${{ github.ref_name }}"
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "### Release 创建成功! ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Skill:** ${{ steps.parse_tag.outputs.skill_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** v${{ steps.parse_tag.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "用户可以使用以下命令安装:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          REPO_OWNER=$(jq -r ".repository.owner" skills.json)
+          REPO_NAME=$(jq -r ".repository.repo" skills.json)
+          echo "npx skills add ${REPO_OWNER}/${REPO_NAME} --skill ${{ steps.parse_tag.outputs.skill_name }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "查看 Release: [${{ github.ref_name }}](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }})" >> $GITHUB_STEP_SUMMARY

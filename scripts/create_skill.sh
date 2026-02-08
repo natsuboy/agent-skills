@@ -30,6 +30,10 @@ SKILL_NAME=$1
 SKILL_DIR="skills/$SKILL_NAME"
 CONFIG_FILE="skills.json"
 
+# 获取当前仓库配置
+REPO_OWNER=$(jq -r '.repository.owner // "YOUR_USERNAME"' "$CONFIG_FILE")
+REPO_NAME=$(jq -r '.repository.repo // "agent-skills"' "$CONFIG_FILE")
+
 # 校验 skill 名称格式: 仅允许小写字母、数字和连字符，且不能以连字符开头或结尾
 if [[ ! "$SKILL_NAME" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
   log_error "Invalid skill name: '$SKILL_NAME'\nAllowed format: kebab-case (e.g., 'my-skill', 'data-processor')"
@@ -77,23 +81,12 @@ Description of the skill.
 ## Installation
 
 \`\`\`bash
-npx ${SKILL_NAME}-skill-installer
+npx skills add ${REPO_OWNER}/${REPO_NAME} --skill $SKILL_NAME
 \`\`\`
 
 ## Usage
 
 See SKILL.md for detailed instructions.
-EOF
-
-# 生成 INSTALL.md
-cat > "$SKILL_DIR/INSTALL.md" <<EOF
-# Installation Guide
-
-## Automated Installation
-
-\`\`\`bash
-npx ${SKILL_NAME}-skill-installer
-\`\`\`
 EOF
 
 log_step "Updating configuration..."
@@ -112,28 +105,27 @@ if [ -z "$AUTHOR_EMAIL" ]; then
   AUTHOR_EMAIL=$(git config user.email 2>/dev/null || echo "your.email@example.com")
 fi
 
+# 将 kebab-case 转换为 Title Case (e.g. my-new-skill -> My New Skill)
+DISPLAY_NAME=$(echo "$SKILL_NAME" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++)sub(/./,toupper(substr($i,1,1)),$i)}1')
+
 tmp=$(mktemp)
 if jq --arg name "$SKILL_NAME" \
+   --arg displayName "$DISPLAY_NAME" \
    --arg author_name "$AUTHOR_NAME" \
    --arg author_email "$AUTHOR_EMAIL" \
    '.skills[$name] = {
      name: $name,
-     displayName: ($name | ascii_upcase),
+     displayName: $displayName,
      version: "1.0.0",
-     description: "Description for " + $name,
+     description: ("Description for " + $name),
      author: {
        name: $author_name,
        email: $author_email
-     },
-     installer: {
-       packageName: ($name + "-skill-installer"),
-       binName: ("install-" + $name + "-skill")
      },
      files: {
        include: [
          "SKILL.md",
          "README.md",
-         "INSTALL.md",
          "scripts",
          "references",
          "assets"
@@ -152,5 +144,5 @@ echo ""
 echo "Next steps:"
 echo "1. Edit $SKILL_DIR/SKILL.md"
 echo "2. Add your logic to $SKILL_DIR/scripts/"
-echo "3. Run './scripts/publish.sh $SKILL_NAME 1.0.0' to publish"
+echo "3. Run 'make tag SKILL_NAME=$SKILL_NAME VERSION=1.0.0' to publish"
 echo ""
