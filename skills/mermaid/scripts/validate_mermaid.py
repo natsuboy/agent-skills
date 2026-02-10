@@ -66,6 +66,7 @@ class MermaidValidator:
         self.verbose = False
         self.auto_install = False
         self.strict_mode = False  # 严格模式（推荐标准）
+        self.content_cache = None  # 缓存文件内容用于错误定位
 
     # ========== CLI 检测和安装 ==========
 
@@ -186,6 +187,8 @@ class MermaidValidator:
             return False, {"error": f"读取文件失败: {e}"}
 
         # 1. 语法验证（实际渲染）
+        # 缓存文件内容用于错误解析
+        self.content_cache = content
         # 确保使用绝对路径，因为 _validate_syntax 会在临时目录中运行 mmdc
         abs_filepath = os.path.abspath(filepath)
         syntax_ok, syntax_msg = self._validate_syntax(abs_filepath)
@@ -222,6 +225,359 @@ class MermaidValidator:
         self._print_report(result, passed)
 
         return passed, result
+
+    # ========== 错误解析与格式化 ==========
+
+    def _parse_mermaid_error(self, error_msg: str, content: str) -> Dict[str, Any]:
+        """
+        解析 mermaid-cli 错误信息，提取行号、上下文、错误类型和修复建议
+
+        Args:
+            error_msg: 错误信息
+            content: 文件内容
+
+        Returns:
+            包含错误详细信息的字典
+        """
+        result = {
+            "line_number": None,
+            "context_before": [],
+            "error_line": None,
+            "context_after": [],
+            "error_type": None,
+            "error_message": error_msg,
+            "suggestion": None,
+        }
+
+        # 尝试多种错误格式提取行号
+        line_patterns = [
+            r"line (\d+)",  # 标准格式
+            r"at line (\d+)",  # 带前缀
+            r":(\d+):",  # 冒号格式
+            r"position (\d+)",  # 位置格式
+        ]
+
+        for pattern in line_patterns:
+            match = re.search(pattern, error_msg, re.IGNORECASE)
+            if match:
+                result["line_number"] = int(match.group(1))
+                break
+
+        # 提取错误类型
+        error_type_patterns = [
+            (r"Parse error", "syntax"),
+            (r"Unexpected token", "syntax"),
+            (r"Unexpected end", "syntax"),
+            (r"Reserved word", "keyword"),
+            (r"is a reserved word", "keyword"),
+            (r"Unknown keyword", "keyword"),
+            (r"Duplicate ID", "duplicate"),
+            (r"Duplicate identifier", "duplicate"),
+            (r"Undefined", "reference"),
+            (r"not found", "reference"),
+        ]
+
+        for pattern, error_type in error_type_patterns:
+            if re.search(pattern, error_msg, re.IGNORECASE):
+                result["error_type"] = error_type
+                break
+
+        # 如果找到行号，提取上下文
+        if result["line_number"]:
+            lines = content.split("\n")
+            line_num = result["line_number"]
+
+            # 上下文行数（前后各2行）
+            context_lines = 2
+
+            # 错误行
+            if 0 < line_num <= len(lines):
+                result["error_line"] = lines[line_num - 1].strip()
+
+                # 前面的行
+                start = max(0, line_num - context_lines - 1)
+                result["context_before"] = [
+                    f"{i + 1}: {lines[i].strip()}"
+                    for i in range(start, line_num - 1)
+                    if lines[i].strip()
+                ]
+
+                # 后面的行
+                end = min(len(lines), line_num + context_lines)
+                result["context_after"] = [
+                    f"{i + 1}: {lines[i].strip()}"
+                    for i in range(line_num, end)
+                    if lines[i].strip()
+                ]
+
+        # 根据错误类型生成建议
+        result["suggestion"] = self._get_error_suggestion(result)
+
+        return result
+
+    def _get_error_suggestion(self, error_info: Dict[str, Any]) -> str:
+        """根据错误类型提供修复建议"""
+        error_type = error_info.get("error_type")
+        error_msg = error_info.get("error_message", "")
+        error_line = error_info.get("error_line", "")
+
+        # 关键字冲突
+        if error_type == "keyword" or "reserved" in error_msg.lower():
+            keywords = ["end", "class", "click", "call", "note", "loop", "alt", "opt", "par"]
+            for kw in keywords:
+                if kw in error_line.lower():
+                    return f"'{kw}' 是保留关键字，请用引号包裹（\"{kw}\"）或更换ID名称"
+
+        # 语法错误
+        if error_type == "syntax":
+            if "-->" in error_line and not error_line.startswith((" ", "\t")):
+                return "连接行可能缺少缩进或格式不正确"
+
+            if "[" in error_line and "]" not in error_line:
+                return "节点标签缺少闭合的方括号 `]`"
+
+            if "(" in error_line and ")" not in error_line:
+                return "节点标签缺少闭合的圆括号 `)`"
+
+            return "检查语法是否正确，特别注意标点符号和括号匹配"
+
+        # 重复ID
+        if error_type == "duplicate":
+            return "节点ID重复，请确保每个节点ID都是唯一的"
+
+        # 未定义引用
+        if error_type == "reference":
+            return "引用了未定义的节点，请检查节点ID是否正确"
+
+        # 默认建议
+        return "请检查错误行附近的语法和拼写是否正确"
+
+    def _format_error_report(self, error_info: Dict[str, Any]) -> str:
+        """格式化友好的错误报告"""
+        lines = ["", "❌ 语法验证失败", ""]
+
+        # 错误位置
+        if error_info["line_number"]:
+            lines.append(f"📍 错误位置：第 {error_info['line_number']} 行")
+            lines.append("")
+
+        # 上下文
+        if error_info["context_before"] or error_info["error_line"] or error_info["context_after"]:
+            lines.append("📄 上下文：")
+
+            for ctx_line in error_info["context_before"]:
+                lines.append(f"  {ctx_line}")
+
+            if error_info["error_line"]:
+                lines.append(f"  {error_info['line_number']}: {error_info['error_line']}     ← 错误在此行")
+
+            for ctx_line in error_info["context_after"]:
+                lines.append(f"  {ctx_line}")
+
+            lines.append("")
+
+        # 错误类型
+        if error_info["error_type"]:
+            error_type_map = {
+                "syntax": "语法错误",
+                "keyword": "关键字冲突",
+                "duplicate": "重复定义",
+                "reference": "未定义引用",
+            }
+            type_name = error_type_map.get(error_info["error_type"], "未知类型")
+            lines.append(f"🔍 错误类型：{type_name}")
+
+        # 错误信息
+        if error_info["error_message"]:
+            # 简化错误信息
+            error_msg = error_info["error_message"]
+            if len(error_msg) > 100:
+                error_msg = error_msg[:97] + "..."
+            lines.append(f"💡 错误信息：{error_msg}")
+
+        # 修复建议
+        if error_info["suggestion"]:
+            lines.append("")
+            lines.append(f"✨ 修复建议：{error_info['suggestion']}")
+
+        return "\n".join(lines)
+
+    # ========== 主题检测 ==========
+
+    def _detect_theme(self, content: str) -> str:
+        """
+        智能检测当前主题
+
+        Returns:
+            'dark', 'light', 或 'unknown'
+        """
+        # 检查主题配置
+        theme_match = re.search(r"'theme'\s*:\s*'([^']+)'", content)
+        if theme_match:
+            theme = theme_match.group(1).lower()
+            if theme in ["dark", "dark-preset", "darkblue"]:
+                return "dark"
+            elif theme in ["default", "forest", "neutral", "base"]:
+                return "light"
+
+        # 检查 themeVariables 中的 background
+        bg_match = re.search(r"'background'\s*:\s*['\"]#([0-9a-fA-F]{6})", content)
+        if bg_match:
+            bg_hex = bg_match.group(1)
+            # 判断背景亮度
+            bg_rgb = hex_to_rgb(bg_hex)
+            bg_luminance = get_luminance(bg_rgb)
+            if bg_luminance < 0.5:
+                return "dark"
+            else:
+                return "light"
+
+        # 默认为 light
+        return "light"
+
+    # ========== 颜色对比度检查增强 ==========
+
+    def _check_classdef_contrast(self, content: str) -> Dict[str, Any]:
+        """检查 classDef 定义的颜色对比度"""
+        result = {"checked": False, "issues": [], "suggestions": []}
+
+        # 查找所有 classDef 定义
+        # 支持多行和单行格式
+        classdef_pattern = r"classDef\s+(\w+)\s+([^;\n]+)"
+        classdefs = re.findall(classdef_pattern, content)
+
+        if not classdefs:
+            return result
+
+        result["checked"] = True
+
+        # 检测主题
+        theme = self._detect_theme(content)
+        default_text_rgb = (248, 249, 250) if theme == "dark" else (51, 51, 51)
+
+        low_contrast_classes = []
+
+        for class_name, style_def in classdefs:
+            # 提取 fill 和 color
+            fill_match = re.search(r"fill:#([0-9a-fA-F]{6})", style_def)
+            color_match = re.search(r"color:#([0-9a-fA-F]{6})", style_def)
+
+            if fill_match:
+                fill_rgb = hex_to_rgb(fill_match.group(1))
+
+                # 如果指定了 color，使用指定的；否则使用默认
+                text_rgb = default_text_rgb
+                if color_match:
+                    text_rgb = hex_to_rgb(color_match.group(1))
+
+                # 计算对比度
+                contrast = get_contrast_ratio(fill_rgb, text_rgb)
+
+                if contrast < 4.5:
+                    low_contrast_classes.append(
+                        {
+                            "class": class_name,
+                            "fill": fill_match.group(1),
+                            "color": color_match.group(1) if color_match else None,
+                            "contrast": round(contrast, 2),
+                        }
+                    )
+
+        if low_contrast_classes:
+            result["issues"].append(
+                f"发现{len(low_contrast_classes)}个 classDef 对比度不足（WCAG AA 要求 4.5:1）"
+            )
+            for item in low_contrast_classes:
+                color_info = f", color:#{item['color']}" if item['color'] else ""
+                result["suggestions"].append(
+                    f"  • classDef {item['class']} (fill:#{item['fill']}{color_info}): "
+                    f"对比度 {item['contrast']}:1"
+                )
+        else:
+            result["suggestions"].append("✅ classDef 颜色对比度符合WCAG AA标准")
+
+        return result
+
+    def _check_theme_variables_contrast(self, content: str) -> Dict[str, Any]:
+        """检查 themeVariables 的颜色对比度"""
+        result = {"checked": False, "issues": [], "suggestions": []}
+
+        # 查找 themeVariables
+        tv_match = re.search(
+            r"'themeVariables'\s*:\s*\{([^}]+)\}", content, re.DOTALL
+        )
+        if not tv_match:
+            return result
+
+        result["checked"] = True
+
+        variables_str = tv_match.group(1)
+
+        # 提取主要颜色变量
+        color_vars = {}
+        var_patterns = [
+            (r"'primaryColor'\s*:\s*'#([0-9a-fA-F]{6})'", "primaryColor"),
+            (r"'secondaryColor'\s*:\s*'#([0-9a-fA-F]{6})'", "secondaryColor"),
+            (r"'tertiaryColor'\s*:\s*'#([0-9a-fA-F]{6})'", "tertiaryColor"),
+            (r"'background'\s*:\s*'#([0-9a-fA-F]{6})'", "background"),
+            (r"'primaryTextColor'\s*:\s*'#([0-9a-fA-F]{6})'", "primaryTextColor"),
+            (r"'secondaryTextColor'\s*:\s*'#([0-9a-fA-F]{6})'", "secondaryTextColor"),
+            (r"'lineColor'\s*:\s*'#([0-9a-fA-F]{6})'", "lineColor"),
+        ]
+
+        for pattern, var_name in var_patterns:
+            match = re.search(pattern, variables_str)
+            if match:
+                color_vars[var_name] = match.group(1)
+
+        # 检查主要对比度
+        issues = []
+        if "primaryColor" in color_vars and "primaryTextColor" in color_vars:
+            fill_rgb = hex_to_rgb(color_vars["primaryColor"])
+            text_rgb = hex_to_rgb(color_vars["primaryTextColor"])
+            contrast = get_contrast_ratio(fill_rgb, text_rgb)
+
+            if contrast < 4.5:
+                issues.append(
+                    f"  • primaryColor vs primaryTextColor: 对比度 {round(contrast, 2)}:1 "
+                    f"(#{color_vars['primaryColor']} vs #{color_vars['primaryTextColor']})"
+                )
+
+        if "secondaryColor" in color_vars and "secondaryTextColor" in color_vars:
+            fill_rgb = hex_to_rgb(color_vars["secondaryColor"])
+            text_rgb = hex_to_rgb(color_vars["secondaryTextColor"])
+            contrast = get_contrast_ratio(fill_rgb, text_rgb)
+
+            if contrast < 4.5:
+                issues.append(
+                    f"  • secondaryColor vs secondaryTextColor: 对比度 {round(contrast, 2)}:1 "
+                    f"(#{color_vars['secondaryColor']} vs #{color_vars['secondaryTextColor']})"
+                )
+
+        # 检查背景与lineColor的对比度
+        if "background" in color_vars and "lineColor" in color_vars:
+            bg_rgb = hex_to_rgb(color_vars["background"])
+            line_rgb = hex_to_rgb(color_vars["lineColor"])
+            contrast = get_contrast_ratio(bg_rgb, line_rgb)
+
+            if contrast < 3.0:  # 稍低的标准
+                issues.append(
+                    f"  • background vs lineColor: 对比度 {round(contrast, 2)}:1 "
+                    f"(#{color_vars['background']} vs #{color_vars['lineColor']})"
+                )
+
+        if issues:
+            result["issues"].append(
+                f"发现 {len(issues)} 处 themeVariables 对比度不足"
+            )
+            result["suggestions"].extend(issues)
+            result["suggestions"].append(
+                "💡 建议调整颜色使对比度至少达到 WCAG AA 标准（4.5:1）"
+            )
+        else:
+            result["suggestions"].append("✅ themeVariables 颜色对比度符合标准")
+
+        return result
 
     # ========== 语法验证 ==========
 
@@ -268,18 +624,25 @@ class MermaidValidator:
                 if result.returncode == 0 and output_files:
                     return True, "语法正确，渲染成功"
                 else:
-                    # 改进错误信息捕获
+                    # 使用新的错误解析功能
                     error_parts = []
                     if result.returncode != 0:
                         error_parts.append(f"退出码: {result.returncode}")
                     if result.stderr:
-                        error_parts.append(f"错误: {result.stderr}")
+                        error_parts.append(result.stderr)
                     if result.stdout:
-                        error_parts.append(f"输出: {result.stdout[:100]}")
+                        error_parts.append(result.stdout)
 
                     error_msg = " | ".join(error_parts) if error_parts else "未知错误"
 
-                    # 提取关键错误信息
+                    # 尝试解析错误并生成友好的错误报告
+                    if self.content_cache:
+                        error_info = self._parse_mermaid_error(error_msg, self.content_cache)
+                        if error_info["line_number"] or error_info["error_type"]:
+                            # 成功解析错误，返回格式化的错误报告
+                            return False, self._format_error_report(error_info)
+
+                    # 无法解析，返回原始错误信息
                     if "Parse error" in error_msg:
                         return False, f"语法解析错误：{error_msg[:200]}"
                     return False, f"渲染失败：{error_msg[:200]}"
@@ -495,47 +858,108 @@ class MermaidValidator:
         return result
 
     def _check_color_contrast(self, content: str) -> Dict[str, Any]:
-        """检查颜色对比度"""
-        result = {"checked": False, "issues": [], "suggestions": []}
+        """检查颜色对比度（增强版：检查style、classDef、themeVariables）"""
+        result = {
+            "checked": False,
+            "style": {"checked": False, "issues": [], "suggestions": []},
+            "classdef": {"checked": False, "issues": [], "suggestions": []},
+            "theme_variables": {"checked": False, "issues": [], "suggestions": []},
+            "issues": [],
+            "suggestions": [],
+        }
 
-        # 查找所有的样式定义
+        # 1. 检查 style 定义中的颜色对比度
+        # 增强模式：检查 fill、stroke 和 color 属性
         style_patterns = re.findall(
-            r"style\s+(\w+)\s+fill:#([0-9a-fA-F]{6})\s*,\s*stroke:#([0-9a-fA-F]{6})",
-            content,
+            r"style\s+(\w+)\s+([^;]+)", content,
         )
 
-        if not style_patterns:
-            return result
+        if style_patterns:
+            result["checked"] = True
+            result["style"]["checked"] = True
 
-        result["checked"] = True
+            # 检测主题
+            theme = self._detect_theme(content)
+            default_text_rgb = (248, 249, 250) if theme == "dark" else (51, 51, 51)
 
-        # 默认文字颜色（根据主题推断）
-        has_dark_theme = "'theme':'dark'" in content or "theme: dark" in content
-        default_text_rgb = (248, 249, 250) if has_dark_theme else (51, 51, 51)
+            low_contrast_nodes = []
 
-        low_contrast_nodes = []
+            for node_id, style_def in style_patterns:
+                # 提取 fill 和 color
+                fill_match = re.search(r"fill:#([0-9a-fA-F]{6})", style_def)
+                color_match = re.search(r"color:#([0-9a-fA-F]{6})", style_def)
 
-        for node_id, fill_hex, stroke_hex in style_patterns:
-            fill_rgb = hex_to_rgb(fill_hex)
+                if fill_match:
+                    fill_rgb = hex_to_rgb(fill_match.group(1))
 
-            # 计算填充色与文字色的对比度
-            contrast = get_contrast_ratio(fill_rgb, default_text_rgb)
+                    # 如果指定了 color，使用指定的；否则使用默认
+                    text_rgb = default_text_rgb
+                    if color_match:
+                        text_rgb = hex_to_rgb(color_match.group(1))
 
-            # WCAG AA 标准：至少 4.5:1
-            if contrast < 4.5:
-                low_contrast_nodes.append(
-                    {"node": node_id, "fill": fill_hex, "contrast": round(contrast, 2)}
+                    # 计算对比度
+                    contrast = get_contrast_ratio(fill_rgb, text_rgb)
+
+                    # WCAG AA 标准：至少 4.5:1
+                    if contrast < 4.5:
+                        color_info = f", color:#{color_match.group(1)}" if color_match else ""
+                        low_contrast_nodes.append(
+                            {
+                                "node": node_id,
+                                "fill": fill_match.group(1),
+                                "color": color_match.group(1) if color_match else None,
+                                "contrast": round(contrast, 2),
+                            }
+                        )
+
+            if low_contrast_nodes:
+                result["style"]["issues"].append(
+                    f"发现{len(low_contrast_nodes)}个节点对比度不足（WCAG AA 要求 4.5:1）"
                 )
+                for item in low_contrast_nodes:
+                    color_info = f", color:#{item['color']}" if item['color'] else ""
+                    result["style"]["suggestions"].append(
+                        f"  • 节点 {item['node']} (fill:#{item['fill']}{color_info}): "
+                        f"对比度 {item['contrast']}:1"
+                    )
+                result["style"]["suggestions"].append(
+                    "💡 修复建议：\n"
+                    "   1. 浅色背景用深色文字（#333）\n"
+                    "   2. 深色背景用浅色文字（#f8f9fa）\n"
+                    "   3. 使用预定义主题避免手动调色"
+                )
+            else:
+                result["style"]["suggestions"].append("✅ style 颜色对比度符合WCAG AA标准")
 
-        if low_contrast_nodes:
-            result["issues"].append(
-                f"发现{len(low_contrast_nodes)}个节点对比度不足（WCAG AA 要求 4.5:1）"
-            )
-            result["suggestions"].append(
-                "建议调整颜色以提升对比度，或使用浅色/深色文字"
-            )
-        else:
-            result["suggestions"].append("✅ 颜色对比度符合WCAG AA标准")
+        # 2. 检查 classDef 定义中的颜色对比度
+        classdef_result = self._check_classdef_contrast(content)
+        result["classdef"] = classdef_result
+        if classdef_result["checked"]:
+            result["checked"] = True
+
+        # 3. 检查 themeVariables 中的颜色对比度
+        themevar_result = self._check_theme_variables_contrast(content)
+        result["theme_variables"] = themevar_result
+        if themevar_result["checked"]:
+            result["checked"] = True
+
+        # 汇总所有问题和建议
+        all_issues = []
+        all_suggestions = []
+
+        for check_name in ["style", "classdef", "theme_variables"]:
+            check_result = result[check_name]
+            if check_result.get("issues"):
+                all_issues.extend(check_result["issues"])
+            if check_result.get("suggestions"):
+                all_suggestions.extend(check_result["suggestions"])
+
+        result["issues"] = all_issues
+        result["suggestions"] = all_suggestions
+
+        # 如果没有任何检查，返回未检查状态
+        if not result["checked"]:
+            result["suggestions"].append("未找到颜色定义，无需检查对比度")
 
         return result
 
@@ -721,6 +1145,181 @@ class MermaidValidator:
 
         return {"issues": issues, "suggestions": suggestions, "penalties": penalties}
 
+    # ========== 自动修复功能 ==========
+
+    def auto_fix_issues(
+        self,
+        content: str,
+        fix_types: list = None,
+        dry_run: bool = False
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        自动修复常见问题
+
+        Args:
+            content: 文件内容
+            fix_types: 要修复的类型列表 ['theme', 'contrast', 'syntax', 'labels']
+            dry_run: 是否为预览模式（不实际修改）
+
+        Returns:
+            (修复后的内容, 修复报告)
+        """
+        if fix_types is None:
+            fix_types = ["theme", "contrast", "syntax", "labels"]
+
+        result = {
+            "fixed": [],
+            "skipped": [],
+            "errors": [],
+            "dry_run": dry_run
+        }
+
+        fixed_content = content
+
+        # 1. 修复主题缺失
+        if "theme" in fix_types:
+            fixed_content, theme_fixes = self._fix_missing_theme(fixed_content)
+            result["fixed"].extend(theme_fixes)
+
+        # 2. 修复废弃语法
+        if "syntax" in fix_types:
+            fixed_content, syntax_fixes = self._fix_deprecated_syntax(fixed_content)
+            result["fixed"].extend(syntax_fixes)
+
+        # 3. 修复标签过长
+        if "labels" in fix_types:
+            fixed_content, label_fixes = self._fix_long_labels(fixed_content)
+            result["fixed"].extend(label_fixes)
+
+        # 4. 修复颜色对比度
+        if "contrast" in fix_types:
+            fixed_content, contrast_fixes = self._fix_contrast_issues(fixed_content)
+            result["fixed"].extend(contrast_fixes)
+
+        return fixed_content, result
+
+    def _fix_missing_theme(self, content: str) -> Tuple[str, list]:
+        """修复缺失的主题配置"""
+        fixes = []
+
+        # 检查是否已有主题配置
+        has_init = "%%{init:" in content
+        has_config = "---" in content and "config:" in content
+
+        if has_init or has_config:
+            return content, fixes
+
+        # 检测主题类型
+        has_dark_keywords = any(
+            kw in content.lower() for kw in ["dark", "night", "black"]
+        )
+
+        theme = "dark" if has_dark_keywords else "default"
+
+        # 在文件开头插入主题配置
+        lines = content.split("\n")
+        mermaid_start = -1
+
+        # 找到 ```mermaid 所在行
+        for i, line in enumerate(lines):
+            if "mermaid" in line.lower():
+                mermaid_start = i
+                break
+
+        if mermaid_start >= 0:
+            # 在 ```mermaid 后插入主题配置
+            lines.insert(mermaid_start + 1, f"%%{{init: {{'theme':'{theme}'}}}}%%")
+            fixes.append(f"添加主题配置：{theme}")
+        else:
+            # 直接在开头插入
+            lines.insert(0, f"%%{{init: {{'theme':'{theme}'}}}}%%")
+            fixes.append(f"添加主题配置：{theme}")
+
+        return "\n".join(lines), fixes
+
+    def _fix_deprecated_syntax(self, content: str) -> Tuple[str, list]:
+        """修复废弃的 graph 语法"""
+        fixes = []
+        fixed_content = content
+
+        # 检查是否使用了 graph 而不是 flowchart
+        graph_pattern = r"\bgraph\s+(TD|TB|LR|RL|BT)"
+
+        matches = list(re.finditer(graph_pattern, fixed_content, re.IGNORECASE))
+
+        if matches:
+            # 替换为 flowchart
+            fixed_content = re.sub(
+                r"\bgraph\s+(TD|TB|LR|RL|BT)",
+                r"flowchart \1",
+                fixed_content,
+                count=1  # 只替换第一个
+            )
+            fixes.append(f"将 'graph' 替换为 'flowchart'")
+
+        return fixed_content, fixes
+
+    def _fix_long_labels(self, content: str) -> Tuple[str, list]:
+        """修复过长的标签"""
+        fixes = []
+        fixed_content = content
+        max_length = 25
+
+        # 查找所有标签
+        label_pattern = r"\[([^\]]+)\]"
+
+        def shorten_label(match):
+            label = match.group(1)
+
+            # 跳过已经是简短的标签或包含引号的标签
+            if len(label) <= max_length or label.startswith('"'):
+                return match.group(0)
+
+            # 简化标签（取前 max_length 个字符并添加省略号）
+            shortened = label[:max_length-3] + "..."
+            fixes.append(f"缩短标签：'{label}' → '{shortened}'")
+
+            return f'["{shortened}"]'
+
+        fixed_content = re.sub(label_pattern, shorten_label, fixed_content)
+
+        return fixed_content, fixes
+
+    def _fix_contrast_issues(self, content: str) -> Tuple[str, list]:
+        """修复颜色对比度问题（简化版）"""
+        fixes = []
+        fixed_content = content
+
+        # 检测主题
+        theme = self._detect_theme(content)
+
+        # 为浅色背景的节点添加文字颜色
+        if theme == "light":
+            # 浅色背景应该用深色文字
+            # 查找浅色填充但没有指定文字颜色的样式
+            pattern = r"(style\s+\w+\s+[^;]*?fill:#(?:[e-f][0-9a-f]|[f][0-9a]){6}[^\n]*?)(?:,|\s*$)"
+
+            def add_color_to_light_style(match):
+                style_def = match.group(1)
+
+                # 检查是否已有 color 属性
+                if "color:" in style_def:
+                    return match.group(0)
+
+                # 添加深色文字
+                fixed_style = style_def.rstrip(", ")
+                if not fixed_style.endswith(","):
+                    fixed_style += ", "
+                fixed_style += "color:#333"
+
+                fixes.append("为浅色背景节点添加深色文字 (#333)")
+
+                return fixed_style
+
+            fixed_content = re.sub(pattern, add_color_to_light_style, fixed_content)
+
+        return fixed_content, fixes
+
     # ========== 报告输出 ==========
 
     def _print_report(self, result: Dict, passed: bool):
@@ -875,6 +1474,18 @@ def main():
         metavar="PATH",
         help="验证通过后将文件移动到指定路径",
     )
+    parser.add_argument(
+        "--fix",
+        nargs="?",
+        const="all",
+        choices=["all", "theme", "contrast", "syntax", "labels"],
+        help="自动修复常见问题（可选：all, theme, contrast, syntax, labels）",
+    )
+    parser.add_argument(
+        "--fix-dry-run",
+        action="store_true",
+        help="预览修复（不实际修改文件）",
+    )
 
     args = parser.parse_args()
 
@@ -891,6 +1502,65 @@ def main():
     # 检查并安装 CLI
     if not validator.check_and_install_cli():
         sys.exit(1)
+
+    # 自动修复模式
+    if args.fix:
+        # 读取文件内容
+        try:
+            with open(args.filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            print(f"❌ 读取文件失败: {e}")
+            sys.exit(1)
+
+        # 确定要修复的类型
+        fix_types = None  # None 表示修复所有类型
+        if args.fix != "all":
+            fix_types = [args.fix]
+
+        # 执行修复
+        print(f"{'🔍 预览修复' if args.fix_dry_run else '🔧 自动修复'}...")
+        print()
+
+        fixed_content, fix_result = validator.auto_fix_issues(
+            content,
+            fix_types=fix_types,
+            dry_run=args.fix_dry_run
+        )
+
+        # 显示修复结果
+        if fix_result["fixed"]:
+            print("✅ 已修复以下问题：")
+            for fix in fix_result["fixed"]:
+                print(f"   • {fix}")
+        else:
+            print("ℹ️  没有需要修复的问题")
+
+        if fix_result["errors"]:
+            print("\n⚠️  修复时遇到错误：")
+            for error in fix_result["errors"]:
+                print(f"   • {error}")
+
+        # 如果不是预览模式且有修复，保存文件
+        if not args.fix_dry_run and fix_result["fixed"]:
+            # 创建备份
+            backup_path = args.filepath + ".backup"
+            try:
+                shutil.copy2(args.filepath, backup_path)
+                print(f"\n💾 备份已保存到: {backup_path}")
+            except Exception as e:
+                print(f"\n⚠️  创建备份失败: {e}")
+
+            # 保存修复后的内容
+            try:
+                with open(args.filepath, "w", encoding="utf-8") as f:
+                    f.write(fixed_content)
+                print(f"✅ 修复后的内容已保存到: {args.filepath}")
+            except Exception as e:
+                print(f"❌ 保存文件失败: {e}")
+                sys.exit(1)
+
+        print()
 
     # 执行验证
     passed, _ = validator.validate_file(args.filepath, args.verbose)
